@@ -3,15 +3,14 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 import random
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 import optuna
 from collections import Counter
+import torch
 from torch.utils.tensorboard import SummaryWriter
-from rummy_env import RummyEnv
-
-# Import the RummyEnv from the correct module
-from rummy_env import RummyEnv  # Assuming your environment class is in rummy_env.py
+import matplotlib.pyplot as plt
+from stable_baselines3 import PPO, A2C
+from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.callbacks import BaseCallback
 
 # Placeholder for missing libraries
 try:
@@ -74,92 +73,46 @@ class RummyEnv(gym.Env):
         suit_offset = {'♥': 0, '♦': 13, '♣': 26, '♠': 39}[suit]
         return suit_offset + rank - 1
 
-    def __init__(self):
-        # Initialization code for Rummy game environment
-        self.hand_1 = []  # Player 1's hand
-        self.hand_2 = []  # Player 2's hand
-        self.discard_pile = []  # The discard pile
-        self.deck = []  # The deck of cards
-        self.current_turn = 1  # Who's turn is it
-        self.rounds = 0  # Number of rounds played
-        self.win_count = 0  # Player 1's win count
-        self.loss_count = 0  # Player 1's loss count
-        self.state = None  # Current state
-        self.env = None  # External environment instance (if needed)
-    
-    def _check_win(self, hand):
-        # Define the win condition (custom implementation for Rummy)
-        pass
-    
-    def _evaluate_hand(self, hand):
-        # Evaluate the hand (e.g., points or combinations in Rummy)
-        pass
-    
-    def _get_observation(self):
-        # Return current observation (state)
-        return self.state
-
     def step(self, action):
         reward = 0
         terminated = False
         truncated = False
 
-        # Determine which player's hand is active based on current turn
         active_hand = self.hand_1 if self.current_turn == 1 else self.hand_2
-        
-        # Check if the active player has won
+
         if self._check_win(active_hand):
             terminated = True
-            reward += 100  # Large reward for winning
+            reward += 100
             if self.current_turn == 1:
                 self.win_count += 1
             else:
                 self.loss_count += 1
-        
-        # If action is valid (player discards a card)
-        if action < len(active_hand):  # Discard action
+
+        if action < len(active_hand):
             discarded_card = active_hand.pop(action)
             self.discard_pile.append(discarded_card)
-            reward += 0.5  # Small reward for discarding a card
-        
-        # If action is draw (player draws from the deck)
-        elif action == len(active_hand):  # Draw from deck
+            reward += 0.5
+        elif action == len(active_hand):
             if len(self.deck) > 0:
                 drawn_card = self.deck.pop()
                 active_hand.append(drawn_card)
-                reward += 0  # No immediate reward for drawing a card
             else:
-                terminated = True  # Game ends if the deck is empty
-        
-        else:  # Invalid action (discarding something out of range)
-            reward -= 10  # Large penalty for invalid actions
+                terminated = True
+        else:
+            reward -= 10
 
-        # Evaluate the hand for points or combinations
         reward += self._evaluate_hand(active_hand)
 
-        # If the player has won after evaluation
         if self._check_win(active_hand):
             terminated = True
-            reward += 100  # Large reward for winning
+            reward += 100
 
-        # Switch turns between players
         self.current_turn = 3 - self.current_turn
-        self.rounds += 1  # Increment the round count
+        self.rounds += 1
 
-        # Get the new state/observation
         observation = self._get_observation()
-
-        # Assume `self.env.step(action)` is another environment that needs to be called for some reason
-        self.state, reward, done, info = self.env.step(action)  # If using external environment
-        return self.state, reward, done, info  # Return 4 values
-
-        # Return 5 values as required by the environment (observation, reward, done, truncated, additional info)
         return observation, reward, terminated, truncated, {}
 
-    def reset(self):
-        # Reset the environment to start a new game/round
-        pass
-    
     def _check_win(self, hand):
         return self._has_pure_sequence(hand) and self._has_valid_combinations(hand)
 
@@ -184,43 +137,61 @@ class RummyEnv(gym.Env):
         return sum(1 for count in rank_counts.values() if count >= 3) >= 2
 
     def _evaluate_hand(self, hand):
-        """
-        Evaluate the hand and assign a reward based on advanced strategies.
-        """
         reward = 0
-
-        # Track occurrences of pure sequences and valid sets
         has_pure_sequence = self._has_pure_sequence(hand)
         has_valid_combinations = self._has_valid_combinations(hand)
 
-        # Log metrics for tracking
         self.metrics["pure_sequences"] += 1 if has_pure_sequence else 0
         self.metrics["valid_sets"] += 1 if has_valid_combinations else 0
 
-        # Pure sequence check
         if has_pure_sequence:
             reward += 50
 
-        # Valid combinations check
         if has_valid_combinations:
             reward += 30
 
-        # High-point cards penalty
         high_point_cards = [10, 11, 12, 13, 1]
         for card in hand:
             if card != 'joker' and card[0] in high_point_cards:
-                reward -= 2  # Penalize holding high-point cards
+                reward -= 2
 
-        # Discarding high-point cards reward
         if self.current_turn == 1:
             last_discard = self.discard_pile[-1] if self.discard_pile else None
             if last_discard and last_discard != 'joker' and last_discard[0] in high_point_cards:
-                reward += 5  # Reward discarding high-point cards
-                
-        # Penalize for excessive cards
+                reward += 5
+
         reward -= len(hand) * 0.2
 
         return reward
+
+    
+def _is_in_combination(self, hand, card):
+    """
+    Check if the given card is part of a valid combination (set or sequence) in the hand.
+    """
+    rank_counts = {}
+    for c in hand:
+        if c != 'joker':
+            rank = c[0]
+            rank_counts[rank] = rank_counts.get(rank, 0) + 1
+
+    if card != 'joker':
+        rank = card[0]
+        if rank_counts.get(rank, 0) >= 3:
+            return True
+
+    sorted_hand = sorted([c for c in hand if c != 'joker'], key=lambda x: (x[1], x[0]))
+    temp_seq = []
+    for c in sorted_hand:
+        if temp_seq and c[1] == temp_seq[-1][1] and c[0] == temp_seq[-1][0] + 1:
+            temp_seq.append(c)
+        else:
+            if len(temp_seq) >= 3:
+                return True
+            temp_seq = [c]
+    return len(temp_seq) >= 3
+
+
 
 # Callbacks for Logging
 if BaseCallback is not None:
@@ -236,16 +207,14 @@ if BaseCallback is not None:
             self.timesteps.append(self.num_timesteps)
             self.rewards.append(self.locals['rewards'][0])
 
-            # Log average reward every 1000 steps
             if self.num_timesteps % 1000 == 0:
-                avg_reward = np.mean(self.rewards[-100:])  # Average over the last 100 steps
+                avg_reward = np.mean(self.rewards[-100:])
                 self.writer.add_scalar("Average Reward", avg_reward, self.num_timesteps)
                 print(f"Step: {self.num_timesteps}, Avg Reward: {avg_reward:.2f}")
                 self.live_plot.update(self.timesteps, self.rewards)
 
             return True
 
-# Live Plot Class
 class LivePlot:
     def __init__(self):
         self.fig, self.ax = plt.subplots()
@@ -265,75 +234,265 @@ class LivePlot:
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
 
+
 def optimize_hyperparameters(trial):
-    print("Starting a new trial...")
-
-    # Define the hyperparameters to optimize
-    num_envs = trial.suggest_int("num_envs", 1, 2)  # Reduced for debugging
-    batch_size = trial.suggest_categorical("batch_size", [128, 256])  # Reduced options for faster testing
-    learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True)
-    gamma = trial.suggest_float("gamma", 0.9, 0.999)
-
-    log_dir = "./ppo_rummy_logs/optuna/"
-    os.makedirs(log_dir, exist_ok=True)
+    num_envs = trial.suggest_int('num_envs', 2, 4)
+    batch_size = trial.suggest_int('batch_size', 64, 512)
+    learning_rate = trial.suggest_loguniform('learning_rate', 1e-5, 1e-3)
+    gamma = trial.suggest_uniform('gamma', 0.8, 0.99)
+    lr_scheduler = trial.suggest_categorical('lr_scheduler', ['constant', 'exponential_decay'])
 
     env = SubprocVecEnv([lambda: RummyEnv(max_rounds=100) for _ in range(num_envs)])
-    model = PPO("MlpPolicy", env, verbose=0, tensorboard_log=log_dir,
-                batch_size=batch_size, n_steps=1024, learning_rate=learning_rate, gamma=gamma)  # Reduced n_steps
-    # Inside optimize_hyperparameters function
-    learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True)
-    gamma = trial.suggest_float("gamma", 0.9, 0.999)
-    exploration_fraction = trial.suggest_float("exploration_fraction", 0.1, 0.3)
 
-    model = PPO("MlpPolicy", env, verbose=0, tensorboard_log=log_dir,
-            batch_size=batch_size, n_steps=1024, learning_rate=learning_rate,
-            gamma=gamma, exploration_fraction=exploration_fraction)
+    model = PPO("MlpPolicy", env, verbose=0, learning_rate=learning_rate, gamma=gamma,
+                batch_size=batch_size, n_steps=1024)
 
-    # Training the model with timeout limit
-    try:
-        model.learn(total_timesteps=5000)  # Cap total training time
-    except Exception as e:
-        print(f"Trial failed: {e}")
-        env.close()
-        return -float('inf')
+    if lr_scheduler == 'exponential_decay':
+        model.learning_rate = learning_rate * (0.95 ** np.arange(1000))
 
-    # Evaluate model performance
+    model.learn(total_timesteps=5000)
+
     total_rewards = []
-    for _ in range(2):  # Evaluate across 2 episodes for faster feedback
+    for _ in range(5):
         obs = env.reset()
         terminated = np.zeros(num_envs, dtype=bool)
         total_reward = np.zeros(num_envs)
-
-        step_count = 0
-        while not terminated.all() and step_count < 1000:  # Limit steps per evaluation
+        while not terminated.all():
             action, _ = model.predict(obs)
-            step_result = env.step(action)
-            obs, reward, terminated, info = step_result[:4]
+            obs, reward, terminated, info = env.step(action)
             total_reward += reward
-            step_count += 1
-
         total_rewards.append(np.mean(total_reward))
 
     env.close()
-
-    # Return the average reward as the objective value
     return np.mean(total_rewards)
 
 
+
+# Reward Function Improvement with dynamic hand evaluation
+def custom_evaluate_hand(self, hand):
+    reward = 0
+    has_pure_sequence = self._has_pure_sequence(hand)
+    has_valid_combinations = self._has_valid_combinations(hand)
+
+    if has_pure_sequence:
+        reward += 50
+    if has_valid_combinations:
+        reward += 30
+
+    high_point_cards = [10, 11, 12, 13, 1]
+    for card in hand:
+        if card != 'joker' and card[0] in high_point_cards:
+            reward -= 2
+
+    last_discard = self.discard_pile[-1] if self.discard_pile else None
+    if last_discard and last_discard[0] in high_point_cards:
+        reward += 5
+
+    reward -= len(hand) * 0.2
+
+    return reward
+
+RummyEnv._evaluate_hand = custom_evaluate_hand
+
+
+class EnsembleModel:
+    def __init__(self, models):
+        self.models = models
+
+    def predict(self, obs):
+        actions = [model.predict(obs)[0] for model in self.models]
+        return Counter(actions).most_common(1)[0][0]
+
+
+def transfer_learning(model, env, num_steps=10000):
+    pretrained_model = PPO.load('pretrained_rummy_model')
+    model.set_parameters(pretrained_model.get_parameters())
+    model.learn(total_timesteps=num_steps)
+
+
+
+# Training function with multiple algorithms and optimizations
+def train_model():
+    log_dir = "./ppo_rummy_logs/"
+    os.makedirs(log_dir, exist_ok=True)
+
+    writer = SummaryWriter(log_dir + "custom_metrics/")
+
+    env = SubprocVecEnv([lambda: RummyEnv(max_rounds=100) for _ in range(2)])
+
+    model = PPO("MlpPolicy", env, verbose=1, tensorboard_log=log_dir, batch_size=128, gamma=0.99)
+
+    model.learn(total_timesteps=100000)
+
+    model.save("rummy_ai_model")
+
+    transfer_learning(model, env)
+
+    writer.close()
+    
+def optimize_rewards(trial):
+    w_pure_seq = trial.suggest_int("w_pure_seq", 20, 100)
+    w_valid_set = trial.suggest_int("w_valid_set", 10, 80)
+    w_high_point_penalty = trial.suggest_int("w_high_point_penalty", -5, -1)
+    w_discard_high = trial.suggest_int("w_discard_high", 1, 10)
+    w_stall_penalty = trial.suggest_int("w_stall_penalty", -20, -5)
+
+    env = SubprocVecEnv([lambda: RummyEnv(max_rounds=100) for _ in range(2)])
+
+    model = PPO("MlpPolicy", env, verbose=0, batch_size=128, gamma=0.99)
+    model.learn(total_timesteps=5000)
+
+    total_rewards = []
+    for _ in range(5):
+        obs = env.reset()
+        terminated = np.zeros(2, dtype=bool)
+        total_reward = np.zeros(2)
+        while not terminated.all():
+            action, _ = model.predict(obs)
+            obs, reward, terminated, info = env.step(action)
+            total_reward += reward
+        total_rewards.append(np.mean(total_reward))
+
+    return np.mean(total_rewards)
+
+
+# Optimize using Optuna
+study = optuna.create_study(direction="maximize")
+study.optimize(optimize_hyperparameters, n_trials=100)
+print("Best parameters:", study.best_params)
+
+
+# Train the model after hyperparameter optimization
+train_model()
+
+
+
+def optimize_rewards(trial):
+    w_pure_seq = trial.suggest_int("w_pure_seq", 20, 100)
+    w_valid_set = trial.suggest_int("w_valid_set", 10, 80)
+    w_high_point_penalty = trial.suggest_int("w_high_point_penalty", -5, -1)
+    w_discard_high = trial.suggest_int("w_discard_high", 1, 10)
+    w_stall_penalty = trial.suggest_int("w_stall_penalty", -20, -5)
+    w_joker_usage = trial.suggest_int("w_joker_usage", 5, 20)
+
+    def custom_evaluate_hand(self, hand):
+        reward = 0
+        has_pure_sequence = self._has_pure_sequence(hand)
+        has_valid_combinations = self._has_valid_combinations(hand)
+
+        if has_pure_sequence:
+            reward += w_pure_seq
+        if has_valid_combinations:
+            reward += w_valid_set
+
+        # Penalize holding high-point cards
+        high_point_cards = [10, 11, 12, 13, 1]
+        for card in hand:
+            if card != 'joker' and card[0] in high_point_cards:
+                reward += w_high_point_penalty
+
+        # Reward discarding high-point cards
+        last_discard = self.discard_pile[-1] if self.discard_pile else None
+        if last_discard and last_discard[0] in high_point_cards:
+            reward += w_discard_high
+
+        # Penalize stalling
+        if not has_pure_sequence and not has_valid_combinations:
+            reward += w_stall_penalty
+
+        # Reward for using jokers in valid combinations
+        jokers_used = sum(1 for card in hand if card == 'joker')
+        reward += w_joker_usage * jokers_used
+
+        return reward
+
+    RummyEnv._evaluate_hand = custom_evaluate_hand
+    env = DummyVecEnv([lambda: RummyEnv(max_rounds=100)])
+    model = PPO("MlpPolicy", env, verbose=0)
+    model.learn(total_timesteps=5000)
+
+    win_rate = evaluate_model(model, num_games=50)
+    env.close()
+    return win_rate
+
+
+def evaluate_model(model, num_games=50):
+    """
+    Evaluate the model's performance by simulating a number of games.
+    Returns the win rate as the evaluation metric.
+    """
+    env = DummyVecEnv([lambda: RummyEnv(max_rounds=100)])
+    wins = 0
+
+    for game in range(num_games):
+        obs = env.reset()
+        done = False
+        while not done:
+            action, _ = model.predict(obs)
+            obs, rewards, done, info = env.step(action)
+        if rewards[0] > 0:  # Assuming positive rewards indicate a win
+            wins += 1
+
+    env.close()
+    return wins / num_games  # Win rate
+
+
+if __name__ == '__main__':
+    # No need for freeze_support() unless creating an executable
+    # freeze_support()  # Remove this line
+
+    def optimize_hyperparameters(trial):
+        num_envs = trial.suggest_int('num_envs', 2, 4)
+        batch_size = trial.suggest_int('batch_size', 64, 512)
+        learning_rate = trial.suggest_loguniform('learning_rate', 1e-5, 1e-3)
+        gamma = trial.suggest_uniform('gamma', 0.8, 0.99)
+        lr_scheduler = trial.suggest_categorical('lr_scheduler', ['constant', 'exponential_decay'])
+
+        # Create the environment inside the main block to avoid process spawn issues
+        env = SubprocVecEnv([lambda: RummyEnv(max_rounds=100) for _ in range(num_envs)])
+
+        # Code to set up and train the model with the selected hyperparameters
+        model = PPO("MlpPolicy", env, batch_size=batch_size, gamma=gamma, learning_rate=learning_rate, verbose=0)
+        model.learn(total_timesteps=5000)
+
+        win_rate = evaluate_model(model)
+        return win_rate
+
+    # Create and optimize the study with Optuna
+    study = optuna.create_study(direction="maximize")
+    study.optimize(optimize_hyperparameters, n_trials=100)
+
+    # Optionally print the best parameters found by Optuna
+    print("Best parameters:", study.best_params)
+
+class LivePlot:
+    def __init__(self):
+        self.fig, self.ax = plt.subplots()
+        self.line, = self.ax.plot([], [], lw=2)
+        self.ax.set_xlim(0, 1000)
+        self.ax.set_ylim(0, 100)
+        self.ax.set_xlabel("Timesteps")
+        self.ax.set_ylabel("Rewards")
+        self.ax.set_title("Live Training Progress")
+        plt.ion()
+        plt.show()
+
+    def update(self, timesteps, rewards):
+        self.line.set_data(timesteps, rewards)
+        self.ax.set_xlim(0, max(timesteps) + 1000)
+        self.ax.set_ylim(0, max(rewards) + 10)
+        self.fig.canvas.draw()
+        self.fig.canvas.flush_events()
+
 # Modularized Training Function
 def train_model(total_timesteps=5000, num_envs=2):
-    if PPO is None or DummyVecEnv is None:
-        print("Cannot execute training because required libraries are missing.")
-        return
-
     log_dir = "./ppo_rummy_logs/"
     os.makedirs(log_dir, exist_ok=True)
 
     writer = SummaryWriter(log_dir + "custom_metrics/")
 
     env = SubprocVecEnv([lambda: RummyEnv(max_rounds=100) for _ in range(num_envs)])
-    model = PPO("MlpPolicy", env, verbose=1, tensorboard_log=log_dir, 
-                batch_size=128, n_steps=1024, learning_rate=3e-4, gamma=0.99)  # Reduced batch size and steps
+    model = PPO("MlpPolicy", env, verbose=1, tensorboard_log=log_dir, batch_size=128, gamma=0.99)
 
     live_plot = LivePlot()
     reward_logger = RewardLoggerCallback(writer, live_plot)
@@ -343,158 +502,9 @@ def train_model(total_timesteps=5000, num_envs=2):
     # Save the model
     model.save("rummy_ai_model")
 
-    # Close the writer
     writer.close()
 
     # Keep the plot open
     plt.ioff()
     plt.show()
 
-
-class MetricsLogger:
-    def __init__(self):
-        self.win_count = 0
-        self.loss_count = 0
-        self.total_rewards = []
-        self.pure_sequences = 0
-        self.valid_sets = 0
-        self.actions = []
-        self.rewards = []
-        self.opponent_penalties = 0
-        self.exploration_actions = 0
-        self.exploitation_actions = 0
-
-    def log_game(self, total_reward, metrics, actions, rewards, won, opponent_penalties):
-        self.total_rewards.append(total_reward)
-        self.pure_sequences += metrics['pure_sequences']
-        self.valid_sets += metrics['valid_sets']
-        self.actions.extend(actions)
-        self.rewards.extend(rewards)
-        self.opponent_penalties += opponent_penalties
-        self.pure_sequences += metrics['pure_sequences']  # Correctly log pure sequences
-        self.valid_sets += metrics['valid_sets']  # Correctly log valid sets
-
-        if won:
-            self.win_count += 1
-        else:
-            self.loss_count += 1
-
-    def log_action_type(self, action, is_exploration):
-        if is_exploration:
-            self.exploration_actions += 1
-        else:
-            self.exploitation_actions += 1
-
-    def calculate_metrics(self):
-        win_rate = self.win_count / (self.win_count + self.loss_count) * 100
-        avg_reward = np.mean(self.total_rewards)
-        action_reward_corr = np.corrcoef(self.actions, self.rewards)[0, 1] if len(self.actions) > 1 else 0
-        exploration_exploitation_ratio = self.exploration_actions / (self.exploitation_actions + 1e-5)
-
-        return {
-            'win_rate': win_rate,
-            'avg_reward': avg_reward,
-            'pure_sequences_per_game': self.pure_sequences / len(self.total_rewards),
-            'valid_sets_per_game': self.valid_sets / len(self.total_rewards),
-            'action_reward_corr': action_reward_corr,
-            'opponent_penalties': self.opponent_penalties / len(self.total_rewards),
-            'exploration_exploitation_ratio': exploration_exploitation_ratio
-        }
-
-# Evaluation function with metric tracking
-def evaluate_model(model_path, num_games=10):
-    env = DummyVecEnv([lambda: RummyEnv(max_rounds=100)])
-    model = PPO.load(model_path)
-    metrics_logger = MetricsLogger()
-
-    for game in range(num_games):
-        obs = env.reset()
-        terminated = False
-        total_reward = 0
-        actions = []
-        rewards = []
-        metrics = {'pure_sequences': 0, 'valid_sets': 0}
-        opponent_penalties = 0
-
-        while not terminated:
-            action, _ = model.predict(obs)
-            is_exploration = np.random.rand() < 0.1  # Example: Exploration with 10% probability
-            metrics_logger.log_action_type(action[0], is_exploration)
-            actions.append(action[0])
-            
-            # Unpack correctly for vectorized environment (4 values)
-            obs, reward, terminated, truncated = env.step(action)
-            total_reward += reward[0]  # Adjusted for the returned reward structure
-            rewards.append(reward[0])
-            
-            # Remove references to 'info' since it's no longer returned
-            # If you need to track pure sequences or valid sets, ensure they are handled elsewhere in your environment
-
-        won = total_reward > 0
-        metrics_logger.log_game(total_reward, metrics, actions, rewards, won, opponent_penalties)
-
-    env.close()
-    return metrics_logger.calculate_metrics()
-
-# Training function with TensorBoard logging
-def train_model(total_timesteps=5000, log_dir="./logs/rummy_ai/"):
-    # Create directory for logging
-    os.makedirs(log_dir, exist_ok=True)
-    writer = SummaryWriter(log_dir)
-
-    # Create environment (only once)
-    env = DummyVecEnv([lambda: RummyEnv(max_rounds=100)])
-
-    # Create model (only once)
-    model = PPO("MlpPolicy", env, verbose=1, tensorboard_log=log_dir)
-
-    # Exploration decay parameters
-    exploration_rate = 1.0  # Start with full exploration
-    min_exploration_rate = 0.01  # Minimum exploration rate after decay
-    decay_rate = 0.995  # Decay rate for exploration
-
-    # Training loop with exploration rate decay
-    timestep_per_iteration = 2048  # Number of timesteps per iteration
-    total_iterations = 0  # Keep track of iterations
-    total_steps = 0  # Keep track of total timesteps
-
-    # Training loop
-    while total_steps < total_timesteps:
-        # Update exploration rate
-        exploration_rate = max(min_exploration_rate, exploration_rate * decay_rate)
-
-        # Perform a batch of training steps
-        model.learn(total_timesteps=timestep_per_iteration)  # Train for a batch of steps
-        total_iterations += 1  # Increment iterations
-        total_steps += timestep_per_iteration  # Increment total timesteps
-
-        # After training, evaluate the model and log metrics
-        metrics = evaluate_model("rummy_ai_model", num_games=10)
-        writer.add_scalar("Win Rate", metrics['win_rate'], total_steps)
-        writer.add_scalar("Avg Reward", metrics['avg_reward'], total_steps)
-        writer.add_scalar("Pure Sequences/Game", metrics['pure_sequences_per_game'], total_steps)
-        writer.add_scalar("Valid Sets/Game", metrics['valid_sets_per_game'], total_steps)
-        writer.add_scalar("Action-Reward Correlation", metrics['action_reward_corr'], total_steps)
-        writer.add_scalar("Opponent Penalties/Game", metrics['opponent_penalties'], total_steps)
-        writer.add_scalar("Exploration-Exploitation Ratio", metrics['exploration_exploitation_ratio'], total_steps)
-
-        # Log iterations and total_timesteps to TensorBoard
-        writer.add_scalar("Iterations", total_iterations, total_steps)
-        writer.add_scalar("Total Timesteps", total_steps, total_steps)
-
-        # Optionally log exploration rate to TensorBoard (optional but useful)
-        writer.add_scalar("Exploration Rate", exploration_rate, total_steps)
-
-    # Save the model after training
-    model.save("rummy_ai_model")
-    writer.close()
-
-
-# Main execution
-if __name__ == "__main__":
-    train_model(total_timesteps=5000)
-    metrics = evaluate_model("rummy_ai_model", num_games=50)
-
-    print("Final Metrics:")
-    for key, value in metrics.items():
-        print(f"{key}: {value:.2f}")
